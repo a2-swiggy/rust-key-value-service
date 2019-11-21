@@ -1,4 +1,3 @@
-use futures::{future, Future};
 use actix::{Actor, Context, Message, Handler, AsyncContext};
 use std::collections::HashMap;
 use diesel::r2d2::ConnectionManager;
@@ -7,6 +6,8 @@ use r2d2::Pool;
 use std::time::Duration;
 use crate::models::{Pair, NewPair};
 use crate::schema::config::dsl::config;
+use crate::schema::config::dsl::name as config_name;
+use crate::schema::config::dsl::value as config_value;
 use diesel::prelude::*;
 
 pub type Result<T> = std::result::Result<T, ConfigStoreError>;
@@ -67,6 +68,15 @@ impl Handler<Request> for ConfigStore {
     type Result = Result<Response>;
     fn handle(&mut self, msg: Request, ctx: &mut Context<Self>) -> Result<Response> {
         match msg {
+            Request::FetchPairs(keys) => {
+                let mut map: HashMap<String, String> = HashMap::with_capacity(keys.len());
+                for key in &keys {
+                    if self.pairs.contains_key(key) {
+                        map.insert(key.to_owned(), self.pairs.get(key).unwrap().to_owned());
+                    }
+                }
+                Ok(Response::Pairs(map))
+            }
             Request::AddPair(name, value) => {
                 self.pool.get()
                     .map_err(ConfigStoreError::from)
@@ -74,12 +84,44 @@ impl Handler<Request> for ConfigStore {
                         diesel::insert_into(config)
                             .values(&NewPair { name: &name, value: &value })
                             .execute(&conn)
-                            .expect("Error saving new post");
-                        Ok(Response::Ok(()))
+                            .map_err(|err|ConfigStoreError::Custom { err_str: err.to_string() })
+                            .and_then(|_| {
+                                ctx.notify(DeferredWork::UpdatePairs);
+                                Ok(Response::Ok(()))
+                            })
                     })
             }
             Request::FetchAll() => Ok(Response::Pairs(self.pairs.to_owned())),
-            _ => Ok(Response::Ok(()))
+            Request::DeletePair(key) => {
+                self.pool.get()
+                    .map_err(ConfigStoreError::from)
+                    .and_then(|conn| {
+                        let deleted_rows = diesel::delete(
+                            config.filter(config_name.eq(&key)))
+                            .execute(&conn);
+
+                        if let Ok(_) = deleted_rows {
+                            info!("deleted {}" , key)
+                        }
+
+                        ctx.notify(DeferredWork::UpdatePairs);
+                        Ok(Response::Ok(()))
+                    })
+            }
+            Request::UpdatePair(name, value) => {
+                self.pool.get()
+                    .map_err(ConfigStoreError::from)
+                    .and_then(|conn| {
+                        diesel::update(config.filter(config_name.eq(&name)))
+                            .set(config_value.eq(&value))
+                            .execute(&conn)
+                            .map_err(|err|ConfigStoreError::Custom { err_str: err.to_string() })
+                            .and_then(|_| {
+                                ctx.notify(DeferredWork::UpdatePairs);
+                                Ok(Response::Ok(()))
+                            })
+                    })
+            }
         }
     }
 }

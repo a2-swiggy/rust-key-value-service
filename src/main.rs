@@ -6,6 +6,8 @@ extern crate failure;
 extern crate r2d2;
 #[macro_use]
 extern crate log;
+extern crate futures;
+extern crate actix_web;
 
 mod db;
 mod models;
@@ -26,6 +28,7 @@ pub struct AppState {
 fn main() {
     dotenv().ok();
 
+    std::env::set_var("RUST_LOG", "actix_web=info");
     let sys = System::new("actix-http-server");
 
     let actor = Arc::new(
@@ -37,8 +40,11 @@ fn main() {
             .data(AppState {
                 store: actor.clone()
             })
-            .route("/", web::get().to(routes::get))
-            .route("/", web::post().to(routes::add))
+            .route("/", web::get().to_async(routes::get))
+            .route("/", web::post().to_async(routes::add))
+            .route("/", web::put().to_async(routes::update))
+            .route("/all", web::get().to_async(routes::all))
+            .route("/", web::delete().to_async(routes::delete))
     })
         .keep_alive(10)
         .workers(num_workers);
